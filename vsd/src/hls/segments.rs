@@ -63,18 +63,30 @@ pub fn push_segments(stream: &mut playlist::MediaPlaylist, m3u8: m3u8_rs::MediaP
     stream.live = !m3u8.end_list;
     stream.media_sequence = m3u8.media_sequence;
 
-    let mut next_byte = 0;
+    let mut next_segment_byte = 0;
+    let mut previous_segment_uri: Option<String> = None;
+    let mut next_map_byte = 0;
+    let mut previous_map_uri: Option<String> = None;
 
     for segment in m3u8.segments {
+        if previous_segment_uri.as_deref() != Some(segment.uri.as_str()) {
+            next_segment_byte = 0;
+            previous_segment_uri = Some(segment.uri.clone());
+        }
+
         let map = segment
             .map
             .map(|x| {
+                if previous_map_uri.as_deref() != Some(x.uri.as_str()) {
+                    next_map_byte = 0;
+                    previous_map_uri = Some(x.uri.clone());
+                }
                 Ok::<playlist::Map, Error>(playlist::Map {
                     uri: x.uri,
                     range: x
                         .byte_range
                         .as_ref()
-                        .map(|br| parse_byte_range(br, &mut next_byte))
+                        .map(|br| parse_byte_range(br, &mut next_map_byte))
                         .transpose()?,
                 })
             })
@@ -83,7 +95,7 @@ pub fn push_segments(stream: &mut playlist::MediaPlaylist, m3u8: m3u8_rs::MediaP
         let range = segment
             .byte_range
             .as_ref()
-            .map(|br| parse_byte_range(br, &mut next_byte))
+            .map(|br| parse_byte_range(br, &mut next_segment_byte))
             .transpose()?;
 
         stream.segments.push(playlist::Segment {
