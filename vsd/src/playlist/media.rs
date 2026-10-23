@@ -148,11 +148,7 @@ impl MediaPlaylist {
         self.codecs
             .as_ref()
             .map(|c| {
-                if c.len() > 12 {
-                    format!("{}…", &c[..11])
-                } else {
-                    c.to_owned()
-                }
+                truncate_chars(c, 11)
             })
             .unwrap_or("?".to_owned())
     }
@@ -161,11 +157,7 @@ impl MediaPlaylist {
         self.language
             .as_ref()
             .map(|c| {
-                if c.len() > 10 {
-                    format!("{}…", &c[..9])
-                } else {
-                    c.to_owned()
-                }
+                truncate_chars(c, 9)
             })
             .unwrap_or("?".to_owned())
     }
@@ -177,6 +169,18 @@ impl MediaPlaylist {
             .map(|x| x.replace(" ", ""))
             .collect::<Vec<String>>()
             .join(" ")
+    }
+}
+
+// Truncate by Unicode scalar values rather than byte offsets: codec and language
+// metadata can contain non-ASCII text, and slicing at an arbitrary byte can panic.
+fn truncate_chars(value: &str, max_chars: usize) -> String {
+    let mut chars = value.chars();
+    let prefix: String = chars.by_ref().take(max_chars).collect();
+    if chars.next().is_some() {
+        format!("{prefix}…")
+    } else {
+        prefix
     }
 }
 
@@ -234,5 +238,18 @@ impl std::fmt::Display for MediaPlaylist {
             }
         }
         Ok(())
+    }
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::truncate_chars;
+
+    #[test]
+    fn truncate_chars_handles_multibyte_text() {
+        assert_eq!(truncate_chars("en-US", 9), "en-US");
+        assert_eq!(truncate_chars("日本語の字幕", 4), "日本語の…");
+        assert_eq!(truncate_chars("éééé", 2), "éé…");
     }
 }
