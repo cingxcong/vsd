@@ -123,6 +123,18 @@ impl Mp4Parser {
             _ => (),
         }
 
+        // Reject impossible box lengths before doing arithmetic or allocating payloads.
+        // A normal box has an 8-byte header; an extended-size box has a 16-byte header.
+        let base_header_size = if has_64_bit_size { 16u64 } else { 8u64 };
+        if size < base_header_size {
+            return Err(Error::Other(format!(
+                "invalid MP4 box {name}: size {size} is smaller than its {base_header_size}-byte header"
+            )));
+        }
+        let box_end = start.checked_add(size).ok_or_else(|| {
+            Error::Other(format!("invalid MP4 box {name}: size overflows input offsets"))
+        })?;
+
         let box_definition = self.box_definitions.get(&type_).cloned();
         // let header_type = self.headers.get(&type_).cloned();
 
@@ -141,9 +153,17 @@ impl Mp4Parser {
                 flags = Some(version_and_flags & 0xFFFFFF);
             }
 
+            // The declared box must include every header field consumed above.
+            let header_end = reader.get_position();
+            if header_end > box_end {
+                return Err(Error::Other(format!(
+                    "invalid MP4 box {name}: header exceeds declared box size"
+                )));
+            }
+
             // Read the whole payload so that the current level can be safely read
             // regardless of how the payload is parsed.
-            let mut end = start + size;
+            let mut end = box_end;
 
             if partial_okay && end > reader.get_length() {
                 // For partial reads, truncate the payload if we must.
@@ -155,7 +175,6 @@ impl Mp4Parser {
                 return Ok(());
             }
 
-            let header_end = reader.get_position();
             let payload_size = end - header_end;
             let payload = if payload_size > 0 {
                 reader.read_bytes_u8(payload_size as usize)?
@@ -185,8 +204,9 @@ impl Mp4Parser {
             // If the box is longer than the remaining parts of the file, e.g. the
             // mp4 is improperly formatted, or this was a partial range request that
             // ended in the middle of a box, just skip to the end.
-            let skip_length = (start + size - reader.get_position())
-                .min(reader.get_length() - reader.get_position());
+            let skip_length = box_end
+                .saturating_sub(reader.get_position())
+                .min(reader.get_length().saturating_sub(reader.get_position()));
             reader.skip(skip_length)?;
         }
 
@@ -433,5 +453,25 @@ impl<'a> ParsedBox<'a> {
         data.extend_from_slice(&self.header);
         data.extend_from_slice(self.reader.as_bytes());
         data
+    }
+}
+
+
+#[cfg(test)]
+mod parser_hardening_tests {
+    use super::Mp4Parser;
+
+    #[test]
+    fn rejects_box_smaller_than_header() {
+        let data = [0, 0, 0, 4, b'f', b't', b'y', b'p'];
+        let error = Mp4Parser::new().parse(&data, false, false).unwrap_err();
+        assert!(error.to_string().contains("smaller than"));
+    }
+
+    #[test]
+    fn rejects_extended_size_smaller_than_header() {
+        let data = [0, 0, 0, 1, b'f', b't', b'y', b'p', 0, 0, 0, 0, 0, 0, 0, 8];
+        let error = Mp4Parser::new().parse(&data, false, false).unwrap_err();
+        assert!(error.to_string().contains("smaller than"));
     }
 }
