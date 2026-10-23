@@ -237,10 +237,37 @@ async fn resolve_segments(
                 ));
             };
 
-            // For dynamic MPDs, offset start_number past expired segments
+            // Validate before calculating the live-window offset; malformed zero
+            // durations or timescales would otherwise produce infinities and overflow.
+            if timescale == 0 {
+                return Err(Error::DashParse(
+                    "SegmentTemplate @timescale must be greater than zero.".into(),
+                ));
+            }
+            if !duration.is_finite() || duration <= 0.0 {
+                return Err(Error::DashParse(
+                    "SegmentTemplate @duration must be finite and greater than zero.".into(),
+                ));
+            }
+            if !dynamic_time_offset.is_finite() || dynamic_time_offset < 0.0 {
+                return Err(Error::DashParse(
+                    "Dynamic segment time offset must be finite and non-negative.".into(),
+                ));
+            }
+
+            // For dynamic MPDs, offset start_number past expired segments.
             let segment_duration_secs = duration / timescale as f64;
-            let start_number =
-                start_number + (dynamic_time_offset / segment_duration_secs).floor() as u64;
+            let expired_segments = (dynamic_time_offset / segment_duration_secs).floor();
+            if !expired_segments.is_finite() || expired_segments > u64::MAX as f64 {
+                return Err(Error::DashParse(
+                    "Dynamic segment number offset exceeds the supported range.".into(),
+                ));
+            }
+            let start_number = start_number
+                .checked_add(expired_segments as u64)
+                .ok_or_else(|| {
+                    Error::DashParse("Segment number overflows the supported range.".into())
+                })?;
 
             let mut segments = resolve_segment_template_duration(
                 base_url,
