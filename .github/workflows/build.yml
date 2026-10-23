@@ -46,6 +46,10 @@ jobs:
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
       - name: Build
         run: cargo build -p vsd --release --no-default-features --features "capture,license,native-tls"
+      - name: Test MP4 parser
+        run: cargo test -p vsd-mp4
+      - name: Test VSD
+        run: cargo test -p vsd --no-default-features --features "capture,license,native-tls"
       - name: Set SHORT_SHA
         shell: bash
         run: echo "SHORT_SHA=${GITHUB_SHA::7}" >> $GITHUB_ENV
