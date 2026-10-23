@@ -213,15 +213,28 @@ impl FormatExpr {
         }
 
         let mut filters = Vec::new();
-        let mut remaining = s;
+        let mut remaining = s.trim();
 
-        while let Some(start) = remaining.find('[') {
+        while !remaining.is_empty() {
+            if !remaining.starts_with('[') {
+                return Err(Error::FormatParse(format!(
+                    "unexpected text after format keyword or filter: '{}'",
+                    remaining
+                )));
+            }
+
             let end = remaining.find(']').ok_or_else(|| {
                 Error::FormatParse(format!("unclosed bracket in '{}'", remaining))
             })?;
-            let inner = &remaining[start + 1..end];
+            let inner = &remaining[1..end];
+            if inner.contains('[') {
+                return Err(Error::FormatParse(
+                    "nested filter brackets are not supported".into(),
+                ));
+            }
+
             filters.push(Self::parse_one_filter(inner)?);
-            remaining = &remaining[end + 1..];
+            remaining = remaining[end + 1..].trim_start();
         }
 
         Ok(filters)
@@ -539,6 +552,8 @@ mod tests {
         assert!(FormatExpr::parse("bv[height=720").is_err());
         assert!(FormatExpr::parse("bv] / ba").is_err());
         assert!(FormatExpr::parse("bv[height=720]]").is_err());
+        assert!(FormatExpr::parse("bv[height=720]junk").is_err());
+        assert!(FormatExpr::parse("bv[height=720][[vcodec=avc1]]").is_err());
     }
 
     #[test]
