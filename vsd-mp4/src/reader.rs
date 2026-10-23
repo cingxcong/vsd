@@ -54,7 +54,9 @@ impl Reader {
     ///
     /// Returns an error if the new position exceeds the total data length.
     pub fn skip(&mut self, bytes: u64) -> Result<()> {
-        let position = self.get_position() + bytes;
+        let position = self.get_position().checked_add(bytes).ok_or_else(|| {
+            Error::new(ErrorKind::OutOfMemory, "skip length overflows reader position.")
+        })?;
 
         if position > self.get_length() {
             return Err(Error::new(
