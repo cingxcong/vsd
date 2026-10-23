@@ -504,4 +504,29 @@ mod parser_hardening_tests {
         let error = parser.parse(&data, false, false).unwrap_err();
         assert!(error.to_string().contains("header exceeds declared box size"));
     }
+
+    #[test]
+    fn truncated_nested_boxes_never_panic() {
+        use super::children;
+        use std::panic::{AssertUnwindSafe, catch_unwind};
+
+        // moov contains a FullBox child. Try every truncated prefix of the
+        // otherwise complete input to exercise all header/payload boundaries.
+        let data = [
+            0, 0, 0, 24, b'm', b'o', b'o', b'v',
+            0, 0, 0, 12, b't', b'e', b's', b't',
+            0, 0, 0, 0, 0, 0, 0, 0,
+        ];
+
+        for length in 0..=data.len() {
+            let prefix = &data[..length];
+            let result = catch_unwind(AssertUnwindSafe(|| {
+                let mut parser = Mp4Parser::new()
+                    .base_box("moov", children)
+                    .full_box("test", |_| Ok(()));
+                let _ = parser.parse(prefix, false, false);
+            }));
+            assert!(result.is_ok(), "parser panicked on {length}-byte prefix");
+        }
+    }
 }
