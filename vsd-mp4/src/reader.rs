@@ -131,6 +131,14 @@ impl Reader {
     ///
     /// Returns an error if there is not enough data left to read.
     pub fn read_bytes_u8(&mut self, bytes: usize) -> Result<Vec<u8>> {
+        let remaining = self.get_length().saturating_sub(self.get_position());
+        if bytes as u128 > remaining as u128 {
+            return Err(Error::new(
+                ErrorKind::UnexpectedEof,
+                "not enough data to read requested byte count.",
+            ));
+        }
+
         let mut buf = vec![0; bytes];
         self.inner.read_exact(&mut buf)?;
         Ok(buf)
@@ -165,5 +173,19 @@ impl Reader {
             Endianness::Big => Ok(i32::from_be_bytes(buf)),
             Endianness::Little => Ok(i32::from_le_bytes(buf)),
         }
+    }
+}
+
+#[cfg(test)]
+mod reader_hardening_tests {
+    use super::Reader;
+    use std::io::ErrorKind;
+
+    #[test]
+    fn byte_reads_check_remaining_length_before_allocating() {
+        let mut reader = Reader::new_big_endian(&[1, 2, 3]);
+        let error = reader.read_bytes_u8(usize::MAX).unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::UnexpectedEof);
+        assert_eq!(reader.get_position(), 0);
     }
 }
