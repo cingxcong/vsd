@@ -155,9 +155,9 @@ impl Save {
         }
 
         for pair in s.split(';') {
-            let (kid, key) = pair
-                .split_once(':')
-                .ok_or_else(|| anyhow::anyhow!("Expected 'KID:KEY;…' but found '{}'.", s))?;
+            let Some((kid, key)) = pair.split_once(':') else {
+                bail!("Expected 'KID:KEY;…' but found '{}'.", s);
+            };
             let kid = kid.to_ascii_lowercase().replace('-', "");
             let key = key.to_ascii_lowercase().replace('-', "");
 
