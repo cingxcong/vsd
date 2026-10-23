@@ -1,10 +1,23 @@
-use crate::playlist;
+use crate::{
+    error::{Error, Result},
+    playlist,
+};
 
-fn parse_byte_range(br: &m3u8_rs::ByteRange, next_byte: &mut u64) -> playlist::Range {
+fn parse_byte_range(br: &m3u8_rs::ByteRange, next_byte: &mut u64) -> Result<playlist::Range> {
+    if br.length == 0 {
+        return Err(Error::Other("HLS byte-range length must be greater than zero.".into()));
+    }
+
     let start = br.offset.unwrap_or(*next_byte);
-    let end = start + br.length - 1;
-    *next_byte = end + 1;
-    playlist::Range(start, end)
+    let end = start
+        .checked_add(br.length)
+        .and_then(|exclusive_end| exclusive_end.checked_sub(1))
+        .ok_or_else(|| Error::Other("HLS byte-range end overflows the supported range.".into()))?;
+    *next_byte = end
+        .checked_add(1)
+        .ok_or_else(|| Error::Other("HLS byte-range continuation overflows the supported range.".into()))?;
+
+    Ok(playlist::Range(start, end))
 }
 
 fn parse_key(key: m3u8_rs::Key) -> playlist::Key {
@@ -45,7 +58,7 @@ fn parse_key(key: m3u8_rs::Key) -> playlist::Key {
     }
 }
 
-pub fn push_segments(stream: &mut playlist::MediaPlaylist, m3u8: m3u8_rs::MediaPlaylist) {
+pub fn push_segments(stream: &mut playlist::MediaPlaylist, m3u8: m3u8_rs::MediaPlaylist) -> Result<()> {
     stream.i_frame = m3u8.i_frames_only;
     stream.live = !m3u8.end_list;
     stream.media_sequence = m3u8.media_sequence;
@@ -53,14 +66,25 @@ pub fn push_segments(stream: &mut playlist::MediaPlaylist, m3u8: m3u8_rs::MediaP
     let mut next_byte = 0;
 
     for segment in m3u8.segments {
-        let map = segment.map.map(|x| playlist::Map {
-            uri: x.uri,
-            range: x.byte_range.map(|br| parse_byte_range(&br, &mut next_byte)),
-        });
+        let map = segment
+            .map
+            .map(|x| {
+                Ok(playlist::Map {
+                    uri: x.uri,
+                    range: x
+                        .byte_range
+                        .as_ref()
+                        .map(|br| parse_byte_range(br, &mut next_byte))
+                        .transpose()?,
+                })
+            })
+            .transpose()?;
 
         let range = segment
             .byte_range
-            .map(|br| parse_byte_range(&br, &mut next_byte));
+            .as_ref()
+            .map(|br| parse_byte_range(br, &mut next_byte))
+            .transpose()?;
 
         stream.segments.push(playlist::Segment {
             duration: segment.duration,
@@ -81,4 +105,6 @@ pub fn push_segments(stream: &mut playlist::MediaPlaylist, m3u8: m3u8_rs::MediaP
             stream.extension = Some("mp4".to_owned());
         }
     }
+
+    Ok(())
 }
