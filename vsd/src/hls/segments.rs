@@ -63,14 +63,16 @@ pub fn push_segments(stream: &mut playlist::MediaPlaylist, m3u8: m3u8_rs::MediaP
     stream.live = !m3u8.end_list;
     stream.media_sequence = m3u8.media_sequence;
 
-    let mut next_segment_byte = 0;
+    // An omitted EXT-X-BYTERANGE offset is valid only when the immediately
+    // preceding media segment was a byte range of the same resource.
+    let mut next_segment_byte: Option<u64> = None;
     let mut previous_segment_uri: Option<String> = None;
     let mut next_map_byte = 0;
     let mut previous_map_uri: Option<String> = None;
 
     for segment in m3u8.segments {
         if previous_segment_uri.as_deref() != Some(segment.uri.as_str()) {
-            next_segment_byte = 0;
+            next_segment_byte = None;
             previous_segment_uri = Some(segment.uri.clone());
         }
 
@@ -92,11 +94,24 @@ pub fn push_segments(stream: &mut playlist::MediaPlaylist, m3u8: m3u8_rs::MediaP
             })
             .transpose()?;
 
-        let range = segment
-            .byte_range
-            .as_ref()
-            .map(|br| parse_byte_range(br, &mut next_segment_byte))
-            .transpose()?;
+        let range = if let Some(br) = segment.byte_range.as_ref() {
+            let start = match br.offset {
+                Some(offset) => offset,
+                None => next_segment_byte.ok_or_else(|| {
+                    Error::Other(
+                        "HLS byte-range offset is omitted but the previous segment is not a byte range of the same resource.".into(),
+                    )
+                })?,
+            };
+            let mut next_byte = start;
+            let range = parse_byte_range(br, &mut next_byte)?;
+            next_segment_byte = Some(next_byte);
+            Some(range)
+        } else {
+            // A full-resource segment breaks implicit byte-range continuation.
+            next_segment_byte = None;
+            None
+        };
 
         stream.segments.push(playlist::Segment {
             duration: segment.duration,
@@ -119,4 +134,34 @@ pub fn push_segments(stream: &mut playlist::MediaPlaylist, m3u8: m3u8_rs::MediaP
     }
 
     Ok(())
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use m3u8_rs::ByteRange;
+
+    #[test]
+    fn implicit_segment_range_requires_previous_range_of_same_resource() {
+        let range = ByteRange { length: 10, offset: None };
+        let mut next_byte = None;
+        let result = next_byte.ok_or_else(|| {
+            Error::Other(
+                "HLS byte-range offset is omitted but the previous segment is not a byte range of the same resource.".into(),
+            )
+        });
+        assert!(result.is_err());
+
+        // An explicit offset remains valid even when there is no preceding range.
+        let explicit = ByteRange { length: 10, offset: Some(20) };
+        let mut next = 20;
+        assert_eq!(parse_byte_range(&explicit, &mut next).unwrap(), playlist::Range(20, 29));
+        assert_eq!(next, 30);
+
+        // Consecutive implicit ranges continue exactly at the prior range's end.
+        let implicit = ByteRange { length: 5, offset: None };
+        let mut next = 30;
+        assert_eq!(parse_byte_range(&implicit, &mut next).unwrap(), playlist::Range(30, 34));
+    }
 }
