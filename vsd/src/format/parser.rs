@@ -91,6 +91,24 @@ impl FormatExpr {
             return Err(Error::FormatParse("expression cannot be empty".into()));
         }
 
+        // Validate bracket structure before splitting. An unmatched closing
+        // bracket otherwise makes the nesting depth negative and can cause
+        // delimiters to be interpreted at the wrong level.
+        let mut depth = 0usize;
+        for ch in s.chars() {
+            match ch {
+                '[' => depth += 1,
+                ']' if depth == 0 => {
+                    return Err(Error::FormatParse("unexpected closing bracket".into()));
+                }
+                ']' => depth -= 1,
+                _ => (),
+            }
+        }
+        if depth != 0 {
+            return Err(Error::FormatParse("unclosed bracket in format expression".into()));
+        }
+
         // Split by "/" for fallback chains (respecting brackets).
         let fallback_parts = Self::split_top_level(s, '/');
 
@@ -514,6 +532,13 @@ mod tests {
         } else {
             panic!("expected fallback");
         }
+    }
+
+    #[test]
+    fn rejects_unbalanced_filter_brackets() {
+        assert!(FormatExpr::parse("bv[height=720").is_err());
+        assert!(FormatExpr::parse("bv] / ba").is_err());
+        assert!(FormatExpr::parse("bv[height=720]]").is_err());
     }
 
     #[test]
