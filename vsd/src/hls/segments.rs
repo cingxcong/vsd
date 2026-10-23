@@ -157,12 +157,12 @@ mod tests {
 
         let explicit = ByteRange { length: 10, offset: Some(20) };
         let (range, next) = parse_segment_byte_range(&explicit, None).unwrap();
-        assert_eq!(range, playlist::Range(20, 29));
+        assert_eq!((range.0, range.1), (20, 29));
         assert_eq!(next, 30);
 
         let implicit = ByteRange { length: 5, offset: None };
         let (range, next) = parse_segment_byte_range(&implicit, Some(30)).unwrap();
-        assert_eq!(range, playlist::Range(30, 34));
+        assert_eq!((range.0, range.1), (30, 34));
         assert_eq!(next, 35);
     }
 
