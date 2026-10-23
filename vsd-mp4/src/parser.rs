@@ -134,6 +134,9 @@ impl Mp4Parser {
         let box_end = start.checked_add(size).ok_or_else(|| {
             Error::Other(format!("invalid MP4 box {name}: size overflows input offsets"))
         })?;
+        let parsed_size = usize::try_from(size).map_err(|_| {
+            Error::Other(format!("invalid MP4 box {name}: size exceeds platform limits"))
+        })?;
 
         let box_definition = self.box_definitions.get(&type_).cloned();
         // let header_type = self.headers.get(&type_).cloned();
@@ -143,6 +146,12 @@ impl Mp4Parser {
             let mut flags = None;
 
             if let BoxType::FullBox = header_type {
+                // A FullBox's version/flags are part of its declared box, not the next sibling.
+                if reader.get_position().saturating_add(4) > box_end {
+                    return Err(Error::Other(format!(
+                        "invalid MP4 box {name}: header exceeds declared box size"
+                    )));
+                }
                 if stop_on_partial && reader.get_position() + 4 > reader.get_length() {
                     self.done = true;
                     return Ok(());
@@ -192,7 +201,7 @@ impl Mp4Parser {
                 version,
                 flags,
                 reader: payload_reader,
-                size: size as usize,
+                size: parsed_size,
                 start: start + abs_start,
                 has_64_bit_size,
                 header: reader.as_bytes()[start as usize..header_end as usize].to_vec(),
@@ -481,5 +490,18 @@ mod parser_hardening_tests {
         let data = [0, 0, 0, 1, b'f', b't', b'y', b'p', 0, 0, 0, 0, 0, 0, 0, 8];
         let error = Mp4Parser::new().parse(&data, false, false).unwrap_err();
         assert!(error.to_string().contains("smaller than"));
+    }
+
+    #[test]
+    fn full_box_rejects_header_that_exceeds_declared_size() {
+        let data = [
+            0, 0, 0, 8, b't', b'e', b's', b't',
+            0, 0, 0, 0,
+        ];
+        let mut parser = Mp4Parser::new().full_box("test", |_| {
+            panic!("callback must not run for an invalid FullBox header");
+        });
+        let error = parser.parse(&data, false, false).unwrap_err();
+        assert!(error.to_string().contains("header exceeds declared box size"));
     }
 }
