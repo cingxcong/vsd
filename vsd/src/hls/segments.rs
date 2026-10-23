@@ -20,6 +20,23 @@ fn parse_byte_range(br: &m3u8_rs::ByteRange, next_byte: &mut u64) -> Result<play
     Ok(playlist::Range(start, end))
 }
 
+fn parse_segment_byte_range(
+    br: &m3u8_rs::ByteRange,
+    next_byte: Option<u64>,
+) -> Result<(playlist::Range, u64)> {
+    let start = match br.offset {
+        Some(offset) => offset,
+        None => next_byte.ok_or_else(|| {
+            Error::Other(
+                "HLS byte-range offset is omitted but the previous segment is not a byte range of the same resource.".into(),
+            )
+        })?,
+    };
+    let mut next = start;
+    let range = parse_byte_range(br, &mut next)?;
+    Ok((range, next))
+}
+
 fn parse_key(key: m3u8_rs::Key) -> playlist::Key {
     let mut method = match &key.method {
         m3u8_rs::KeyMethod::AES128 => playlist::KeyMethod::Aes128,
@@ -95,16 +112,7 @@ pub fn push_segments(stream: &mut playlist::MediaPlaylist, m3u8: m3u8_rs::MediaP
             .transpose()?;
 
         let range = if let Some(br) = segment.byte_range.as_ref() {
-            let start = match br.offset {
-                Some(offset) => offset,
-                None => next_segment_byte.ok_or_else(|| {
-                    Error::Other(
-                        "HLS byte-range offset is omitted but the previous segment is not a byte range of the same resource.".into(),
-                    )
-                })?,
-            };
-            let mut next_byte = start;
-            let range = parse_byte_range(br, &mut next_byte)?;
+            let (range, next_byte) = parse_segment_byte_range(br, next_segment_byte)?;
             next_segment_byte = Some(next_byte);
             Some(range)
         } else {
@@ -143,25 +151,27 @@ mod tests {
     use m3u8_rs::ByteRange;
 
     #[test]
-    fn implicit_segment_range_requires_previous_range_of_same_resource() {
-        let range = ByteRange { length: 10, offset: None };
-        let mut next_byte = None;
-        let result = next_byte.ok_or_else(|| {
-            Error::Other(
-                "HLS byte-range offset is omitted but the previous segment is not a byte range of the same resource.".into(),
-            )
-        });
-        assert!(result.is_err());
+    fn implicit_segment_range_requires_previous_range() {
+        let implicit = ByteRange { length: 10, offset: None };
+        assert!(parse_segment_byte_range(&implicit, None).is_err());
 
-        // An explicit offset remains valid even when there is no preceding range.
         let explicit = ByteRange { length: 10, offset: Some(20) };
-        let mut next = 20;
-        assert_eq!(parse_byte_range(&explicit, &mut next).unwrap(), playlist::Range(20, 29));
+        let (range, next) = parse_segment_byte_range(&explicit, None).unwrap();
+        assert_eq!(range, playlist::Range(20, 29));
         assert_eq!(next, 30);
 
-        // Consecutive implicit ranges continue exactly at the prior range's end.
         let implicit = ByteRange { length: 5, offset: None };
-        let mut next = 30;
-        assert_eq!(parse_byte_range(&implicit, &mut next).unwrap(), playlist::Range(30, 34));
+        let (range, next) = parse_segment_byte_range(&implicit, Some(30)).unwrap();
+        assert_eq!(range, playlist::Range(30, 34));
+        assert_eq!(next, 35);
+    }
+
+    #[test]
+    fn segment_range_rejects_zero_length_and_overflow() {
+        let zero = ByteRange { length: 0, offset: Some(0) };
+        assert!(parse_segment_byte_range(&zero, None).is_err());
+
+        let overflow = ByteRange { length: 2, offset: Some(u64::MAX) };
+        assert!(parse_segment_byte_range(&overflow, None).is_err());
     }
 }
