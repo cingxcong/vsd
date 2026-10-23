@@ -155,19 +155,20 @@ impl Save {
         }
 
         for pair in s.split(';') {
-            if let Some((kid, key)) = pair.split_once(':') {
-                let kid = kid.to_ascii_lowercase().replace('-', "");
-                let key = key.to_ascii_lowercase().replace('-', "");
+            let (kid, key) = pair
+                .split_once(':')
+                .ok_or_else(|| anyhow::anyhow!("Expected 'KID:KEY;…' but found '{}'.", s))?;
+            let kid = kid.to_ascii_lowercase().replace('-', "");
+            let key = key.to_ascii_lowercase().replace('-', "");
 
-                if kid.len() == 32
-                    && key.len() == 32
-                    && kid.chars().all(|c| c.is_ascii_hexdigit())
-                    && key.chars().all(|c| c.is_ascii_hexdigit())
-                {
-                    keys.insert(kid, key);
-                } else {
-                    bail!("Expected 'KID:KEY;…' but found '{}'.", s);
-                }
+            if kid.len() == 32
+                && key.len() == 32
+                && kid.chars().all(|c| c.is_ascii_hexdigit())
+                && key.chars().all(|c| c.is_ascii_hexdigit())
+            {
+                keys.insert(kid, key);
+            } else {
+                bail!("Expected 'KID:KEY;…' but found '{}'.", s);
             }
         }
 
@@ -312,11 +313,31 @@ fn truncate_display(value: &str, max_chars: usize) -> String {
 
 #[cfg(test)]
 mod display_tests {
-    use super::truncate_display;
+    use super::{Save, truncate_display};
 
     #[test]
     fn truncation_is_unicode_safe() {
         assert_eq!(truncate_display("English", 8), "English");
         assert_eq!(truncate_display("日本語字幕", 3), "日本語…");
+    }
+
+    #[test]
+    fn parses_and_normalizes_decryption_keys() {
+        let keys = Save::parse_keys(
+            "00112233445566778899AABBCCDDEEFF:FFEEDDCCBBAA99887766554433221100",
+        )
+        .unwrap();
+
+        assert_eq!(
+            keys.get("00112233445566778899aabbccddeeff").unwrap(),
+            "ffeeddccbbaa99887766554433221100"
+        );
+    }
+
+    #[test]
+    fn rejects_malformed_decryption_key_pairs() {
+        assert!(Save::parse_keys("not-a-key-pair").is_err());
+        assert!(Save::parse_keys("00112233445566778899aabbccddeeff:bad").is_err());
+        assert!(Save::parse_keys("00112233445566778899aabbccddeeff:ffeeddccbbaa99887766554433221100;").is_err());
     }
 }
