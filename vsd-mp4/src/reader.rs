@@ -54,7 +54,9 @@ impl Reader {
     ///
     /// Returns an error if the new position exceeds the total data length.
     pub fn skip(&mut self, bytes: u64) -> Result<()> {
-        let position = self.get_position() + bytes;
+        let position = self.get_position().checked_add(bytes).ok_or_else(|| {
+            Error::new(ErrorKind::OutOfMemory, "skip length overflows reader position.")
+        })?;
 
         if position > self.get_length() {
             return Err(Error::new(
@@ -129,6 +131,14 @@ impl Reader {
     ///
     /// Returns an error if there is not enough data left to read.
     pub fn read_bytes_u8(&mut self, bytes: usize) -> Result<Vec<u8>> {
+        let remaining = self.get_length().saturating_sub(self.get_position());
+        if bytes as u128 > remaining as u128 {
+            return Err(Error::new(
+                ErrorKind::UnexpectedEof,
+                "not enough data to read requested byte count.",
+            ));
+        }
+
         let mut buf = vec![0; bytes];
         self.inner.read_exact(&mut buf)?;
         Ok(buf)
@@ -140,6 +150,13 @@ impl Reader {
     ///
     /// Returns an error if there is not enough data left to read.
     pub fn read_bytes_u16(&mut self, bytes: usize) -> Result<Vec<u16>> {
+        if bytes % 2 != 0 {
+            return Err(Error::new(
+                ErrorKind::InvalidInput,
+                "byte count for u16 reads must be even.",
+            ));
+        }
+
         Ok(self
             .read_bytes_u8(bytes)?
             .chunks_exact(2)
@@ -163,5 +180,27 @@ impl Reader {
             Endianness::Big => Ok(i32::from_be_bytes(buf)),
             Endianness::Little => Ok(i32::from_le_bytes(buf)),
         }
+    }
+}
+
+#[cfg(test)]
+mod reader_hardening_tests {
+    use super::Reader;
+    use std::io::ErrorKind;
+
+    #[test]
+    fn u16_reads_reject_odd_byte_counts_without_consuming_input() {
+        let mut reader = Reader::new_big_endian(&[0x12, 0x34, 0x56]);
+        let error = reader.read_bytes_u16(3).unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::InvalidInput);
+        assert_eq!(reader.get_position(), 0);
+    }
+
+    #[test]
+    fn byte_reads_check_remaining_length_before_allocating() {
+        let mut reader = Reader::new_big_endian(&[1, 2, 3]);
+        let error = reader.read_bytes_u8(usize::MAX).unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::UnexpectedEof);
+        assert_eq!(reader.get_position(), 0);
     }
 }

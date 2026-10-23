@@ -98,63 +98,88 @@ pub fn resolve_segment_timeline(
     start_number: u64,
     timescale: u64,
 ) -> Result<Vec<Segment>> {
+    const MAX_SEGMENTS: usize = 1_000_000;
+
+    if timescale == 0 {
+        return Err(Error::DashParse("SegmentTemplate @timescale must be greater than zero.".into()));
+    }
+    if !period_duration_secs.is_finite() || period_duration_secs < 0.0 {
+        return Err(Error::DashParse("Period duration must be finite and non-negative.".into()));
+    }
+
     let media = template.resolve(media);
-    let timescale = timescale as f64;
+    let scale = timescale as f64;
+    let end_time = period_duration_secs * scale;
     let mut number = start_number;
     let mut segments = Vec::new();
     let mut segment_time: u64 = 0;
 
-    for s in &segment_timeline.segments {
+    for (index, s) in segment_timeline.segments.iter().enumerate() {
+        if s.d == 0 {
+            return Err(Error::DashParse("SegmentTimeline @d must be greater than zero.".into()));
+        }
         if let Some(t) = s.t {
             segment_time = t;
         }
 
-        template.insert("Time", segment_time);
-        template.insert("Number", number);
+        let repeat = s.r.unwrap_or(0);
+        let repeat_boundary = if repeat < 0 {
+            segment_timeline.segments[index + 1..]
+                .iter()
+                .find_map(|next| next.t)
+                .map(|t| t as f64)
+                .unwrap_or(end_time)
+        } else {
+            0.0
+        };
 
-        segments.push(Segment {
-            duration: (s.d as f64 / timescale) as f32,
-            uri: base_url.join(&template.resolve(&media))?.to_string(),
-            ..Default::default()
-        });
+        let mut repeat_index: i64 = 0;
+        loop {
+            if segments.len() >= MAX_SEGMENTS {
+                return Err(Error::DashParse(format!(
+                    "SegmentTimeline exceeds the safety limit of {MAX_SEGMENTS} segments."
+                )));
+            }
 
-        number += 1;
+            if repeat < 0 && repeat_index > 0 && segment_time as f64 >= repeat_boundary {
+                break;
+            }
 
-        if let Some(r) = s.r {
-            let mut count = 0;
-            // FIXME - Perhaps we also need to account for startTime?
-            let end_time = period_duration_secs * timescale;
+            template.insert("Time", segment_time);
+            template.insert("Number", number);
+            segments.push(Segment {
+                duration: (s.d as f64 / scale) as f32,
+                uri: base_url.join(&template.resolve(&media))?.to_string(),
+                ..Default::default()
+            });
 
-            loop {
-                count += 1;
-                // Exit from the loop after @r iterations (if @r is positive).
-                // A negative value of the @r attribute indicates that the duration
-                // indicated in @d attribute repeats until the start of the next S
-                // element, the end of the Period or until the next MPD update.
-                if r >= 0 {
-                    if count > r {
-                        break;
-                    }
-                } else if segment_time as f64 > end_time {
+            number = number.checked_add(1).ok_or_else(|| {
+                Error::DashParse("Segment number overflows the supported range.".into())
+            })?;
+
+            if repeat >= 0 {
+                if repeat_index >= repeat as i64 {
                     break;
                 }
-
-                segment_time += s.d;
-
-                template.insert("Time", segment_time);
-                template.insert("Number", number);
-
-                segments.push(Segment {
-                    duration: (s.d as f64 / timescale) as f32,
-                    uri: base_url.join(&template.resolve(&media))?.to_string(),
-                    ..Default::default()
-                });
-
-                number += 1;
+            } else {
+                let next_time = segment_time.checked_add(s.d).ok_or_else(|| {
+                    Error::DashParse("SegmentTimeline timestamp overflows the supported range.".into())
+                })?;
+                if next_time as f64 >= repeat_boundary {
+                    break;
+                }
             }
+
+            segment_time = segment_time.checked_add(s.d).ok_or_else(|| {
+                Error::DashParse("SegmentTimeline timestamp overflows the supported range.".into())
+            })?;
+            repeat_index += 1;
         }
 
-        segment_time += s.d;
+        // Advance to the start time after the final segment in this S element.
+        segment_time = segment_time.checked_add(s.d).ok_or_else(|| {
+            Error::DashParse("SegmentTimeline timestamp overflows the supported range.".into())
+        })?;
     }
 
     Ok(segments)
@@ -169,20 +194,40 @@ pub fn resolve_segment_template_duration(
     start_number: u64,
     timescale: u64,
 ) -> Result<Vec<Segment>> {
-    let media = template.resolve(media);
-    let timescale = timescale as f64;
-    let segment_duration = duration / timescale;
-    let segment_count = (period_duration_secs / segment_duration).ceil() as i64;
-    let start_number = start_number as i64;
-    let mut segments = Vec::new();
+    const MAX_SEGMENTS: usize = 1_000_000;
 
-    for number in start_number..start_number + segment_count {
+    if timescale == 0 {
+        return Err(Error::DashParse("SegmentTemplate @timescale must be greater than zero.".into()));
+    }
+    if !duration.is_finite() || duration <= 0.0 {
+        return Err(Error::DashParse("SegmentTemplate @duration must be finite and greater than zero.".into()));
+    }
+    if !period_duration_secs.is_finite() || period_duration_secs < 0.0 {
+        return Err(Error::DashParse("Period duration must be finite and non-negative.".into()));
+    }
+
+    let media = template.resolve(media);
+    let segment_duration = duration / timescale as f64;
+    let count = (period_duration_secs / segment_duration).ceil();
+    if !count.is_finite() || count < 0.0 || count > MAX_SEGMENTS as f64 {
+        return Err(Error::DashParse(format!(
+            "SegmentTemplate resolves to an invalid or excessive segment count (maximum {MAX_SEGMENTS})."
+        )));
+    }
+    let segment_count = count as usize;
+    let mut segments = Vec::with_capacity(segment_count);
+    let mut number = start_number;
+
+    for _ in 0..segment_count {
         template.insert("Number", number);
         segments.push(Segment {
             duration: segment_duration as f32,
             uri: base_url.join(&template.resolve(&media))?.to_string(),
             ..Default::default()
         });
+        number = number.checked_add(1).ok_or_else(|| {
+            Error::DashParse("Segment number overflows the supported range.".into())
+        })?;
     }
 
     Ok(segments)

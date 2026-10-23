@@ -91,6 +91,24 @@ impl FormatExpr {
             return Err(Error::FormatParse("expression cannot be empty".into()));
         }
 
+        // Validate bracket structure before splitting. An unmatched closing
+        // bracket otherwise makes the nesting depth negative and can cause
+        // delimiters to be interpreted at the wrong level.
+        let mut depth = 0usize;
+        for ch in s.chars() {
+            match ch {
+                '[' => depth += 1,
+                ']' if depth == 0 => {
+                    return Err(Error::FormatParse("unexpected closing bracket".into()));
+                }
+                ']' => depth -= 1,
+                _ => (),
+            }
+        }
+        if depth != 0 {
+            return Err(Error::FormatParse("unclosed bracket in format expression".into()));
+        }
+
         // Split by "/" for fallback chains (respecting brackets).
         let fallback_parts = Self::split_top_level(s, '/');
 
@@ -195,15 +213,28 @@ impl FormatExpr {
         }
 
         let mut filters = Vec::new();
-        let mut remaining = s;
+        let mut remaining = s.trim();
 
-        while let Some(start) = remaining.find('[') {
+        while !remaining.is_empty() {
+            if !remaining.starts_with('[') {
+                return Err(Error::FormatParse(format!(
+                    "unexpected text after format keyword or filter: '{}'",
+                    remaining
+                )));
+            }
+
             let end = remaining.find(']').ok_or_else(|| {
                 Error::FormatParse(format!("unclosed bracket in '{}'", remaining))
             })?;
-            let inner = &remaining[start + 1..end];
+            let inner = &remaining[1..end];
+            if inner.contains('[') {
+                return Err(Error::FormatParse(
+                    "nested filter brackets are not supported".into(),
+                ));
+            }
+
             filters.push(Self::parse_one_filter(inner)?);
-            remaining = &remaining[end + 1..];
+            remaining = remaining[end + 1..].trim_start();
         }
 
         Ok(filters)
@@ -514,6 +545,15 @@ mod tests {
         } else {
             panic!("expected fallback");
         }
+    }
+
+    #[test]
+    fn rejects_unbalanced_filter_brackets() {
+        assert!(FormatExpr::parse("bv[height=720").is_err());
+        assert!(FormatExpr::parse("bv] / ba").is_err());
+        assert!(FormatExpr::parse("bv[height=720]]").is_err());
+        assert!(FormatExpr::parse("bv[height=720]junk").is_err());
+        assert!(FormatExpr::parse("bv[height=720][[vcodec=avc1]]").is_err());
     }
 
     #[test]

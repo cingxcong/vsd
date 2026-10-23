@@ -276,15 +276,34 @@ impl FileDownloader {
                 Ok(response) => {
                     let status = response.status();
 
-                    if status.is_success() {
-                        return Ok(response.bytes().await?.to_vec());
-                    }
+                    if status == reqwest::StatusCode::PARTIAL_CONTENT {
+                        let bytes = response.bytes().await?.to_vec();
+                        let expected_len = range
+                            .1
+                            .checked_sub(range.0)
+                            .and_then(|length| length.checked_add(1));
 
-                    last_err = Some(Error::RequestFailed {
-                        url: url.to_string(),
-                        status,
-                        body: response.text().await?,
-                    });
+                        if expected_len == Some(bytes.len() as u64) {
+                            return Ok(bytes);
+                        }
+
+                        last_err = Some(Error::Other(format!(
+                            "Invalid byte-range response for {} ({}): expected {} bytes, received {}.",
+                            url,
+                            range_label,
+                            expected_len.map_or_else(|| "an unrepresentable number of".to_owned(), |n| n.to_string()),
+                            bytes.len()
+                        )));
+                    } else {
+                        last_err = Some(Error::RequestFailed {
+                            url: url.to_string(),
+                            status,
+                            body: format!(
+                                "Expected HTTP 206 Partial Content for range {}, got {}.",
+                                range_label, status
+                            ),
+                        });
+                    }
                 }
                 Err(e) => {
                     last_err = Some(Error::RequestFailed {

@@ -123,6 +123,21 @@ impl Mp4Parser {
             _ => (),
         }
 
+        // Reject impossible box lengths before doing arithmetic or allocating payloads.
+        // A normal box has an 8-byte header; an extended-size box has a 16-byte header.
+        let base_header_size = if has_64_bit_size { 16u64 } else { 8u64 };
+        if size < base_header_size {
+            return Err(Error::Other(format!(
+                "invalid MP4 box {name}: size {size} is smaller than its {base_header_size}-byte header"
+            )));
+        }
+        let box_end = start.checked_add(size).ok_or_else(|| {
+            Error::Other(format!("invalid MP4 box {name}: size overflows input offsets"))
+        })?;
+        let parsed_size = usize::try_from(size).map_err(|_| {
+            Error::Other(format!("invalid MP4 box {name}: size exceeds platform limits"))
+        })?;
+
         let box_definition = self.box_definitions.get(&type_).cloned();
         // let header_type = self.headers.get(&type_).cloned();
 
@@ -131,6 +146,12 @@ impl Mp4Parser {
             let mut flags = None;
 
             if let BoxType::FullBox = header_type {
+                // A FullBox's version/flags are part of its declared box, not the next sibling.
+                if reader.get_position().saturating_add(4) > box_end {
+                    return Err(Error::Other(format!(
+                        "invalid MP4 box {name}: header exceeds declared box size"
+                    )));
+                }
                 if stop_on_partial && reader.get_position() + 4 > reader.get_length() {
                     self.done = true;
                     return Ok(());
@@ -141,9 +162,17 @@ impl Mp4Parser {
                 flags = Some(version_and_flags & 0xFFFFFF);
             }
 
+            // The declared box must include every header field consumed above.
+            let header_end = reader.get_position();
+            if header_end > box_end {
+                return Err(Error::Other(format!(
+                    "invalid MP4 box {name}: header exceeds declared box size"
+                )));
+            }
+
             // Read the whole payload so that the current level can be safely read
             // regardless of how the payload is parsed.
-            let mut end = start + size;
+            let mut end = box_end;
 
             if partial_okay && end > reader.get_length() {
                 // For partial reads, truncate the payload if we must.
@@ -155,7 +184,6 @@ impl Mp4Parser {
                 return Ok(());
             }
 
-            let header_end = reader.get_position();
             let payload_size = end - header_end;
             let payload = if payload_size > 0 {
                 reader.read_bytes_u8(payload_size as usize)?
@@ -173,7 +201,7 @@ impl Mp4Parser {
                 version,
                 flags,
                 reader: payload_reader,
-                size: size as usize,
+                size: parsed_size,
                 start: start + abs_start,
                 has_64_bit_size,
                 header: reader.as_bytes()[start as usize..header_end as usize].to_vec(),
@@ -181,12 +209,25 @@ impl Mp4Parser {
 
             box_definition(box_)?;
         } else {
-            // Move the read head to be at the end of the box.
-            // If the box is longer than the remaining parts of the file, e.g. the
-            // mp4 is improperly formatted, or this was a partial range request that
-            // ended in the middle of a box, just skip to the end.
-            let skip_length = (start + size - reader.get_position())
-                .min(reader.get_length() - reader.get_position());
+            // Unknown boxes still need valid bounds. Silently accepting a truncated
+            // unknown box makes corrupt input look successfully parsed.
+            if box_end > reader.get_length() {
+                if stop_on_partial {
+                    self.done = true;
+                    return Ok(());
+                }
+                if !partial_okay {
+                    return Err(Error::Other(format!(
+                        "truncated MP4 box {name}: declared end {box_end}, input length {}",
+                        reader.get_length()
+                    )));
+                }
+            }
+
+            // Move to the end of the box, clamping only when partial parsing was requested.
+            let skip_length = box_end
+                .saturating_sub(reader.get_position())
+                .min(reader.get_length().saturating_sub(reader.get_position()));
             reader.skip(skip_length)?;
         }
 
@@ -433,5 +474,81 @@ impl<'a> ParsedBox<'a> {
         data.extend_from_slice(&self.header);
         data.extend_from_slice(self.reader.as_bytes());
         data
+    }
+}
+
+
+#[cfg(test)]
+mod parser_hardening_tests {
+    use super::Mp4Parser;
+
+    #[test]
+    fn reader_skip_rejects_overflowing_lengths() {
+        let mut reader = crate::Reader::new_big_endian(&[1, 2, 3]);
+        let error = reader.skip(u64::MAX).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::OutOfMemory);
+        assert_eq!(reader.get_position(), 0);
+    }
+
+    #[test]
+    fn rejects_box_smaller_than_header() {
+        let data = [0, 0, 0, 4, b'f', b't', b'y', b'p'];
+        let error = Mp4Parser::new().parse(&data, false, false).unwrap_err();
+        assert!(error.to_string().contains("smaller than"));
+    }
+
+    #[test]
+    fn rejects_extended_size_smaller_than_header() {
+        let data = [0, 0, 0, 1, b'f', b't', b'y', b'p', 0, 0, 0, 0, 0, 0, 0, 8];
+        let error = Mp4Parser::new().parse(&data, false, false).unwrap_err();
+        assert!(error.to_string().contains("smaller than"));
+    }
+
+    #[test]
+    fn full_box_rejects_header_that_exceeds_declared_size() {
+        let data = [
+            0, 0, 0, 8, b't', b'e', b's', b't',
+            0, 0, 0, 0,
+        ];
+        let mut parser = Mp4Parser::new().full_box("test", |_| {
+            panic!("callback must not run for an invalid FullBox header");
+        });
+        let error = parser.parse(&data, false, false).unwrap_err();
+        assert!(error.to_string().contains("header exceeds declared box size"));
+    }
+
+    #[test]
+    fn truncated_unknown_box_is_rejected_unless_partial_mode_is_requested() {
+        let data = [0, 0, 0, 16, b'f', b'r', b'e', b'e', 1, 2, 3, 4];
+        let error = Mp4Parser::new().parse(&data, false, false).unwrap_err();
+        assert!(error.to_string().contains("truncated MP4 box free"));
+
+        assert!(Mp4Parser::new().parse(&data, true, false).is_ok());
+        assert!(Mp4Parser::new().parse(&data, false, true).is_ok());
+    }
+
+    #[test]
+    fn truncated_nested_boxes_never_panic() {
+        use super::children;
+        use std::panic::{AssertUnwindSafe, catch_unwind};
+
+        // moov contains a FullBox child. Try every truncated prefix of the
+        // otherwise complete input to exercise all header/payload boundaries.
+        let data = [
+            0, 0, 0, 24, b'm', b'o', b'o', b'v',
+            0, 0, 0, 16, b't', b'e', b's', b't',
+            0, 0, 0, 0, 0, 0, 0, 0,
+        ];
+
+        for length in 0..=data.len() {
+            let prefix = &data[..length];
+            let result = catch_unwind(AssertUnwindSafe(|| {
+                let mut parser = Mp4Parser::new()
+                    .base_box("moov", children)
+                    .full_box("test", |_| Ok(()));
+                let _ = parser.parse(prefix, true, false);
+            }));
+            assert!(result.is_ok(), "parser panicked on {length}-byte prefix");
+        }
     }
 }
