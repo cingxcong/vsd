@@ -151,7 +151,7 @@ impl FetchedPlaylist {
                                 m3u8_rs::parse_media_playlist_res(&m3u8).map_err(|_| {
                                     Error::Other("Unable to parse hls playlist.".into())
                                 })?;
-                            hls::push_segments(stream, media_playlist);
+                            hls::push_segments(stream, media_playlist)?;
                         }
 
                         Ok(pl)
@@ -163,7 +163,7 @@ impl FetchedPlaylist {
                             uri: self.url.to_string(),
                             ..Default::default()
                         };
-                        hls::push_segments(&mut stream, m3u8);
+                        hls::push_segments(&mut stream, m3u8)?;
                         Ok(MasterPlaylist {
                             playlist_type: PlaylistType::Hls,
                             streams: vec![stream],
