@@ -69,7 +69,7 @@ pub fn push_segments(stream: &mut playlist::MediaPlaylist, m3u8: m3u8_rs::MediaP
         let map = segment
             .map
             .map(|x| {
-                Ok(playlist::Map {
+                Ok::<playlist::Map, Error>(playlist::Map {
                     uri: x.uri,
                     range: x
                         .byte_range
