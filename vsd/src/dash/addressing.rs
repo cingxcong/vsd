@@ -122,7 +122,8 @@ pub fn resolve_segment_timeline(
             segment_time = t;
         }
 
-        let repeat_boundary = if s.r < 0 {
+        let repeat = s.r.unwrap_or(0);
+        let repeat_boundary = if repeat < 0 {
             segment_timeline.segments[index + 1..]
                 .iter()
                 .find_map(|next| next.t)
@@ -140,7 +141,7 @@ pub fn resolve_segment_timeline(
                 )));
             }
 
-            if s.r < 0 && repeat_index > 0 && segment_time as f64 >= repeat_boundary {
+            if repeat < 0 && repeat_index > 0 && segment_time as f64 >= repeat_boundary {
                 break;
             }
 
@@ -156,8 +157,8 @@ pub fn resolve_segment_timeline(
                 Error::DashParse("Segment number overflows the supported range.".into())
             })?;
 
-            if s.r >= 0 {
-                if repeat_index >= s.r as i64 {
+            if repeat >= 0 {
+                if repeat_index >= repeat as i64 {
                     break;
                 }
             } else {
