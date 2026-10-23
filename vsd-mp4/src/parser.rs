@@ -209,10 +209,22 @@ impl Mp4Parser {
 
             box_definition(box_)?;
         } else {
-            // Move the read head to be at the end of the box.
-            // If the box is longer than the remaining parts of the file, e.g. the
-            // mp4 is improperly formatted, or this was a partial range request that
-            // ended in the middle of a box, just skip to the end.
+            // Unknown boxes still need valid bounds. Silently accepting a truncated
+            // unknown box makes corrupt input look successfully parsed.
+            if box_end > reader.get_length() {
+                if stop_on_partial {
+                    self.done = true;
+                    return Ok(());
+                }
+                if !partial_okay {
+                    return Err(Error::Other(format!(
+                        "truncated MP4 box {name}: declared end {box_end}, input length {}",
+                        reader.get_length()
+                    )));
+                }
+            }
+
+            // Move to the end of the box, clamping only when partial parsing was requested.
             let skip_length = box_end
                 .saturating_sub(reader.get_position())
                 .min(reader.get_length().saturating_sub(reader.get_position()));
@@ -506,6 +518,16 @@ mod parser_hardening_tests {
     }
 
     #[test]
+    fn truncated_unknown_box_is_rejected_unless_partial_mode_is_requested() {
+        let data = [0, 0, 0, 16, b'f', b'r', b'e', b'e', 1, 2, 3, 4];
+        let error = Mp4Parser::new().parse(&data, false, false).unwrap_err();
+        assert!(error.to_string().contains("truncated MP4 box free"));
+
+        assert!(Mp4Parser::new().parse(&data, true, false).is_ok());
+        assert!(Mp4Parser::new().parse(&data, false, true).is_ok());
+    }
+
+    #[test]
     fn truncated_nested_boxes_never_panic() {
         use super::children;
         use std::panic::{AssertUnwindSafe, catch_unwind};
@@ -524,7 +546,7 @@ mod parser_hardening_tests {
                 let mut parser = Mp4Parser::new()
                     .base_box("moov", children)
                     .full_box("test", |_| Ok(()));
-                let _ = parser.parse(prefix, false, false);
+                let _ = parser.parse(prefix, true, false);
             }));
             assert!(result.is_ok(), "parser panicked on {length}-byte prefix");
         }
