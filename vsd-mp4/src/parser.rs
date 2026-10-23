@@ -462,6 +462,14 @@ mod parser_hardening_tests {
     use super::Mp4Parser;
 
     #[test]
+    fn reader_skip_rejects_overflowing_lengths() {
+        let mut reader = crate::Reader::new_big_endian(&[1, 2, 3]);
+        let error = reader.skip(u64::MAX).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::OutOfMemory);
+        assert_eq!(reader.get_position(), 0);
+    }
+
+    #[test]
     fn rejects_box_smaller_than_header() {
         let data = [0, 0, 0, 4, b'f', b't', b'y', b'p'];
         let error = Mp4Parser::new().parse(&data, false, false).unwrap_err();
