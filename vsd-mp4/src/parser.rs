@@ -514,7 +514,7 @@ mod parser_hardening_tests {
         // otherwise complete input to exercise all header/payload boundaries.
         let data = [
             0, 0, 0, 24, b'm', b'o', b'o', b'v',
-            0, 0, 0, 12, b't', b'e', b's', b't',
+            0, 0, 0, 16, b't', b'e', b's', b't',
             0, 0, 0, 0, 0, 0, 0, 0,
         ];
 
