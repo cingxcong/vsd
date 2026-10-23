@@ -206,11 +206,7 @@ impl Save {
                         .language
                         .as_ref()
                         .map(|c| {
-                            if c.len() > 9 {
-                                format!("{}…", &c[..8])
-                            } else {
-                                c.to_owned()
-                            }
+                            truncate_display(c, 8)
                         })
                         .unwrap_or_default()
                 },
@@ -225,11 +221,7 @@ impl Save {
                     .codecs
                     .as_ref()
                     .map(|c| {
-                        if c.len() > 12 {
-                            format!("{}…", &c[..11])
-                        } else {
-                            c.to_owned()
-                        }
+                        truncate_display(c, 11)
                     })
                     .unwrap_or_default(),
                 stream
@@ -304,5 +296,27 @@ impl Save {
             dl.download(&self.input).await?;
         }
         Ok(())
+    }
+}
+
+
+fn truncate_display(value: &str, max_chars: usize) -> String {
+    let mut chars = value.chars();
+    let prefix: String = chars.by_ref().take(max_chars).collect();
+    if chars.next().is_some() {
+        format!("{prefix}…")
+    } else {
+        prefix
+    }
+}
+
+#[cfg(test)]
+mod display_tests {
+    use super::truncate_display;
+
+    #[test]
+    fn truncation_is_unicode_safe() {
+        assert_eq!(truncate_display("English", 8), "English");
+        assert_eq!(truncate_display("日本語字幕", 3), "日本語…");
     }
 }
