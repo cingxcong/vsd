@@ -165,7 +165,6 @@ pub fn resolve_segment_timeline(
                     Error::DashParse("SegmentTimeline timestamp overflows the supported range.".into())
                 })?;
                 if next_time as f64 >= repeat_boundary {
-                    segment_time = next_time;
                     break;
                 }
             }
